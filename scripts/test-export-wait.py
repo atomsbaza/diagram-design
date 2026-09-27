@@ -38,14 +38,68 @@ WARNING_ANCHOR = "fallback typography"
 FALLBACK_BUDGET_SECONDS = 15.0
 
 
-def load_snippet() -> str:
-    text = EXPORT_DOC.read_text(encoding="utf-8")
-    blocks = re.findall(r"```python\n(.*?)```", text, re.S)
+RASTERIZE_HEADING = re.compile(r"^### Rasterize\b.*$", re.M)
+NEXT_HEADING = re.compile(r"^#{1,3} ", re.M)
+PYTHON_FENCE = re.compile(r"^( *)```python[ \t]*\n(.*?)^\1```[ \t]*$", re.M | re.S)
+
+
+def select_rasterize_block(text: str) -> str:
+    """Return the python block under the Rasterize heading.
+
+    export.md carries other python blocks (the SVG color normalization, for
+    one), so the snippet is located by its section and by the code it runs,
+    never by counting blocks in the whole file.
+    """
+    heading = RASTERIZE_HEADING.search(text)
+    if heading is None:
+        raise AssertionError(f"{EXPORT_DOC.name} has no '### Rasterize' section")
+    section = text[heading.end():]
+    following = NEXT_HEADING.search(section)
+    if following is not None:
+        section = section[: following.start()]
+    blocks = [
+        "\n".join(line[len(indent):] for line in body.splitlines()) + "\n"
+        for indent, body in PYTHON_FENCE.findall(section)
+    ]
     if len(blocks) != 1:
         raise AssertionError(
-            f"expected exactly one python block in {EXPORT_DOC.name}, found {len(blocks)}"
+            "expected exactly one python block in the Rasterize section of "
+            f"{EXPORT_DOC.name}, found {len(blocks)}"
         )
-    snippet = blocks[0]
+    if "sync_playwright" not in blocks[0]:
+        raise AssertionError(
+            "the Rasterize section's python block does not use sync_playwright"
+        )
+    return blocks[0]
+
+
+def require_block_selection() -> None:
+    """The selector must ignore python blocks outside the Rasterize section."""
+    rasterize = (
+        "### Rasterize\n\nRun this:\n\n```python\n"
+        "from playwright.sync_api import sync_playwright\nprint('rasterize')\n"
+        "```\n\nAfter the block.\n"
+    )
+    other = "   ```python\n   import re\n   svg = re.sub('a', 'b', 'a')\n   ```\n"
+    doc = (
+        "# Export\n\n## SVG export procedure\n\n4. Normalize colors:\n\n"
+        f"{other}\n## PNG export procedure\n\n{rasterize}\n"
+        "### Output naming\n\n```python\nprint('later block')\n```\n"
+    )
+    selected = select_rasterize_block(doc)
+    if "print('rasterize')" not in selected or "re.sub" in selected or "later block" in selected:
+        raise AssertionError(f"selector picked the wrong python block:\n{selected}")
+    try:
+        select_rasterize_block(doc.replace("### Rasterize", "### Capture"))
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("selector accepted a doc with no Rasterize section")
+    print("OK: snippet selector finds the Rasterize block among other python blocks")
+
+
+def load_snippet() -> str:
+    snippet = select_rasterize_block(EXPORT_DOC.read_text(encoding="utf-8"))
     for anchor in (
         "except PlaywrightTimeoutError:",
         'page.evaluate("window.stop()")',
@@ -199,6 +253,7 @@ def main() -> int:
         print("SKIP: playwright is not installed; export snippet tests skipped")
         return 0
 
+    require_block_selection()
     snippet = load_snippet()
     with tempfile.TemporaryDirectory(prefix="diagram-export-wait-") as raw_tmp:
         tmp = Path(raw_tmp)
